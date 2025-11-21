@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
+
 const ENV_API_BASE =
   globalThis?.process?.env?.REACT_APP_API_BASE ||
   (typeof import.meta !== "undefined" &&
@@ -76,7 +77,6 @@ export default function App() {
   const [loadingContacts, setLoadingContacts] = useState(false);
 
   const [saving, setSaving] = useState(false);
-  const [savingEdit, setSavingEdit] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editPayload, setEditPayload] = useState({});
 
@@ -154,9 +154,7 @@ export default function App() {
     setError(null);
     try {
       const res = await doFetch("/all_cards");
-      // Accept either shape: res.data or res (if res is array)
-      const cards = Array.isArray(res) ? res : res?.data ?? [];
-      setContacts(cards);
+      setContacts(res.data || []);
     } catch (e) {
       setContacts([]);
       setError(String(e));
@@ -269,48 +267,18 @@ export default function App() {
 
   async function saveEdit() {
     if (!editingId) return;
-    setSavingEdit(true);
-    setError(null);
     try {
-      // make a payload copy and remove fields the backend might not want
-      const payload = { ...editPayload };
-      // remove _id or other server-managed fields to avoid backend rejects
-      delete payload._id;
-      delete payload.created_at;
-      delete payload.edited_at;
-
-      // call backend
-      const res = await doFetch(`/update_card/${editingId}`, {
+      await doFetch(`/update_card/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(editPayload),
       });
-
-      // Helpful debugging: if backend returns object, merge it; otherwise merge payload.
-      const updated =
-        res && typeof res === "object" && !Array.isArray(res)
-          ? { ...payload, ...res }
-          : payload;
-
-      // optimistic UI update: update the contact in state immediately
-      setContacts((list) =>
-        list.map((c) => (c._id === editingId ? { ...c, ...updated } : c))
-      );
-
-      // finalize modal
       setEditingId(null);
       setEditPayload({});
-
-      // attempt to refresh from server to get canonical data
       await fetchAllCards();
-
       showToast("Updated");
     } catch (e) {
-      const msg = e?.message || String(e);
-      setError(msg);
-      console.error("saveEdit error:", e);
-    } finally {
-      setSavingEdit(false);
+      setError(String(e));
     }
   }
 
@@ -1001,22 +969,14 @@ export default function App() {
                             setEditingId(null);
                             setEditPayload({});
                           }}
-                          disabled={savingEdit}
                         >
                           Cancel
                         </button>
                         <button
-                          className="px-3 py-2 bg-indigo-600 text-white rounded flex items-center gap-2"
+                          className="px-3 py-2 bg-indigo-600 text-white rounded"
                           onClick={saveEdit}
-                          disabled={savingEdit}
                         >
-                          {savingEdit ? (
-                            <>
-                              <Spinner size={3} /> Saving...
-                            </>
-                          ) : (
-                            "Save"
-                          )}
+                          Save
                         </button>
                       </div>
                     </motion.div>

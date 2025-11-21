@@ -6,7 +6,7 @@ const ENV_API_BASE =
   (typeof import.meta !== "undefined" &&
     import.meta.env &&
     import.meta.env.VITE_API_BASE) ||
-  ""; // <--- no localhost default
+  "";
 
 function normalizeBase(base) {
   if (!base) return "";
@@ -52,10 +52,17 @@ export default function App() {
   const [tab, setTab] = useState("contacts");
 
   const [apiBaseInput, setApiBaseInput] = useState(
-    () => localStorage.getItem("API_BASE") || ENV_API_BASE || ""
+    () =>
+      localStorage.getItem("API_BASE") ||
+      ENV_API_BASE ||
+      "http://localhost:8000"
   );
   const [apiBase, setApiBase] = useState(() =>
-    normalizeBase(localStorage.getItem("API_BASE") || ENV_API_BASE || "")
+    normalizeBase(
+      localStorage.getItem("API_BASE") ||
+        ENV_API_BASE ||
+        "http://localhost:8000"
+    )
   );
 
   const [file, setFile] = useState(null);
@@ -72,10 +79,6 @@ export default function App() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editPayload, setEditPayload] = useState({});
-
-  // NEW: candidate for deletion (object or null)
-  const [deleteCandidate, setDeleteCandidate] = useState(null);
-  const [deleting, setDeleting] = useState(false);
 
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -151,7 +154,9 @@ export default function App() {
     setError(null);
     try {
       const res = await doFetch("/all_cards");
+      // Accept either shape: res.data or res (if res is array)
       const cards = Array.isArray(res) ? res : res?.data ?? [];
+      // ensure _id is string for consistent comparisons
       const mapped = cards.map((c) => ({ ...c, _id: String(c._id) }));
       setContacts(mapped);
     } catch (e) {
@@ -230,6 +235,7 @@ export default function App() {
         body: JSON.stringify(payload),
       });
 
+      // optimistic UI: append a lightweight card until fetchAllCards completes
       setContacts((c) => [{ _id: `tmp-${Date.now()}`, ...payload }, ...c]);
       await fetchAllCards();
       clearExtract();
@@ -243,56 +249,36 @@ export default function App() {
     }
   }
 
-  // Request delete: open confirmation modal with card details
-  function requestDelete(card) {
-    setDeleteCandidate({ ...card, _id: String(card._id) });
-  }
+  async function handleDelete(id) {
+    if (!confirm("Delete contact?")) return;
 
-  // Cancel deletion
-  function cancelDelete() {
-    setDeleteCandidate(null);
-  }
-
-  // Confirm deletion: call backend, optimistic remove + revert on failure
-  async function confirmDelete() {
-    if (!deleteCandidate) return;
-    const id = String(deleteCandidate._id);
-    setDeleting(true);
-    setError(null);
-
-    // optimistic remove locally
+    // optimistic remove
     const prev = contacts;
-    setContacts((c) => c.filter((x) => String(x._id) !== id));
-
+    setContacts((c) => c.filter((x) => x._id !== id));
     try {
       await doFetch(`/delete_card/${id}`, { method: "DELETE" });
       showToast("Deleted");
-      setDeleteCandidate(null);
     } catch (e) {
-      // revert on error
       setContacts(prev);
       setError(String(e));
-      console.error("delete error", e);
-    } finally {
-      setDeleting(false);
     }
   }
 
-  // old handleDelete replaced by requestDelete
-  // function handleDelete(id) { requestDelete(...) }
-
   function startEdit(card) {
+    // Defensive copy: convert phone_numbers to array if needed
     const copy = { ...card };
     copy.phone_numbers = copy.phone_numbers || [];
     setEditingId(String(card._id));
     setEditPayload(copy);
   }
 
+  // ---------- saveEdit adapted to use Extract's save logic ----------
   async function saveEdit() {
     if (!editingId) return;
     setSavingEdit(true);
     setError(null);
     try {
+      // Build payload using the same normalization as handleSave (Extract)
       const payload = {
         name: editPayload.name || null,
         designation: editPayload.designation || null,
@@ -306,12 +292,14 @@ export default function App() {
         additional_notes: editPayload.additional_notes || "",
       };
 
+      // call backend (PATCH to update existing)
       await doFetch(`/update_card/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
 
+      // optimistic UI: replace the contact with a lightweight merged object
       setContacts((list) =>
         list.map((c) =>
           String(c._id) === String(editingId)
@@ -320,9 +308,13 @@ export default function App() {
         )
       );
 
+      // finalize UI
       setEditingId(null);
       setEditPayload({});
+
+      // refresh canonical list from server (same as Extract save)
       await fetchAllCards();
+
       showToast("Saved");
     } catch (e) {
       console.error("saveEdit error", e);
@@ -331,8 +323,9 @@ export default function App() {
       setSavingEdit(false);
     }
   }
+  // ---------- end saveEdit ----------
 
-  // per-contact vCard
+  // per-contact vCard (uses backend endpoint as before)
   async function downloadVcard(card) {
     try {
       const payload = {
@@ -378,6 +371,7 @@ export default function App() {
     }
   }
 
+  // Helpers for UI
   function initials(name) {
     if (!name) return "?";
     return name
@@ -402,9 +396,11 @@ export default function App() {
       list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
     if (sort === "company")
       list.sort((a, b) => (a.company || "").localeCompare(b.company || ""));
+    // recent: assume backend returns newest first
     return list;
   }
 
+  // create a vCard string for one contact (vCard 3.0)
   function generateVcardText(contact) {
     const lines = ["BEGIN:VCARD", "VERSION:3.0"];
     if (contact.name) lines.push(`FN:${contact.name}`);
@@ -419,6 +415,7 @@ export default function App() {
     return lines.join("\n");
   }
 
+  // Export all contacts as a single .vcf file (multiple vCards concatenated)
   function exportAllVcards() {
     if (!contacts || contacts.length === 0) {
       showToast("No contacts to export");
@@ -437,12 +434,14 @@ export default function App() {
     showToast("Exported all vCards");
   }
 
+  // Excel export (tries xlsx, falls back to CSV)
   async function exportToExcel() {
     if (!contacts || contacts.length === 0) {
       showToast("No contacts to export");
       return;
     }
 
+    // Normalize rows
     const rows = contacts.map((c) => ({
       Name: c.name || "",
       Designation: c.designation || "",
@@ -457,6 +456,7 @@ export default function App() {
     }));
 
     try {
+      // try to dynamically import xlsx (SheetJS)
       const XLSX = await import(/* webpackChunkName: "xlsx" */ "xlsx");
       const ws = XLSX.utils.json_to_sheet(rows);
       const wb = XLSX.utils.book_new();
@@ -473,6 +473,7 @@ export default function App() {
       URL.revokeObjectURL(url);
       showToast("Excel (.xlsx) exported");
     } catch (e) {
+      // fallback to CSV
       try {
         const keys = Object.keys(rows[0]);
         const csv =
@@ -483,6 +484,7 @@ export default function App() {
               keys
                 .map((k) => {
                   const v = (r[k] ?? "").toString();
+                  // escape quotes
                   if (v.includes(",") || v.includes('"') || v.includes("\n")) {
                     return `"${v.replace(/"/g, '""')}"`;
                   }
@@ -508,6 +510,7 @@ export default function App() {
     }
   }
 
+  // Compact card component (hover-reveal — Option B)
   function Card({ c }) {
     return (
       <motion.div
@@ -551,7 +554,7 @@ export default function App() {
           </button>
           <button
             className="px-3 py-1 text-red-600 text-sm"
-            onClick={() => requestDelete(c)}
+            onClick={() => handleDelete(c._id)}
           >
             Delete
           </button>
@@ -560,11 +563,25 @@ export default function App() {
     );
   }
 
+  // Drag & drop handlers
+  function onDropFile(ev) {
+    ev.preventDefault();
+    setDragOver(false);
+    const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (f) setFile(f);
+  }
+
+  function onPickFile(e) {
+    setFile(e.target.files[0] || null);
+  }
+
   const list = filteredAndSorted();
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-white p-6">
       <div className="max-w-full mx-auto px-8">
+        {" "}
+        {/* full width container with padding */}
         <header className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">
@@ -582,7 +599,6 @@ export default function App() {
             </div>
           </div>
         </header>
-
         <div className="bg-white rounded-2xl shadow p-3 overflow-hidden">
           <div className="flex gap-2 p-2 bg-gray-100 rounded-lg">
             <button
@@ -635,7 +651,7 @@ export default function App() {
                   className="md:col-span-2 p-3 border rounded-lg"
                   value={apiBaseInput}
                   onChange={(e) => setApiBaseInput(e.target.value)}
-                  placeholder="Backend URL (leave empty for same origin)"
+                  placeholder="Backend URL (e.g. https://ocr-backend.example.com)"
                 />
                 <div className="flex gap-2">
                   <button
@@ -692,12 +708,7 @@ export default function App() {
                       setDragOver(true);
                     }}
                     onDragLeave={() => setDragOver(false)}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      setDragOver(false);
-                      const f = e.dataTransfer.files && e.dataTransfer.files[0];
-                      if (f) setFile(f);
-                    }}
+                    onDrop={onDropFile}
                     className={`p-4 rounded-lg border-dashed border-2 ${
                       dragOver
                         ? "border-indigo-300 bg-indigo-50"
@@ -709,7 +720,7 @@ export default function App() {
                         ref={fileInputRef}
                         type="file"
                         className="hidden"
-                        onChange={(e) => setFile(e.target.files[0] || null)}
+                        onChange={onPickFile}
                       />
                       <div className="text-sm text-gray-600">
                         Drop an image here or{" "}
@@ -873,6 +884,7 @@ export default function App() {
                       Refresh
                     </button>
 
+                    {/* Export vCards */}
                     <button
                       className="px-3 py-2 border rounded-lg"
                       onClick={exportAllVcards}
@@ -881,6 +893,7 @@ export default function App() {
                       Export vCards
                     </button>
 
+                    {/* Excel/CSV export */}
                     <button
                       className="px-3 py-2 bg-green-600 text-white rounded-lg"
                       onClick={exportToExcel}
@@ -911,7 +924,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Edit modal (same as before) */}
                 {editingId && (
                   <div className="fixed inset-0 bg-black/30 flex items-center justify-center p-4">
                     <motion.div
@@ -1037,7 +1049,6 @@ export default function App() {
             )}
           </div>
         </div>
-
         <footer className="mt-6 text-sm text-gray-500 text-center">
           FASTAPI + React Business Card Manager
         </footer>
@@ -1053,64 +1064,6 @@ export default function App() {
             className="fixed right-6 bottom-6 bg-gray-900 text-white px-4 py-2 rounded shadow"
           >
             {toast}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Delete confirmation modal */}
-      <AnimatePresence>
-        {deleteCandidate && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50"
-          >
-            <motion.div
-              initial={{ scale: 0.98, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.98, opacity: 0 }}
-              className="bg-white rounded-lg p-6 w-full max-w-lg shadow-lg"
-            >
-              <h4 className="text-lg font-semibold mb-2">Confirm delete</h4>
-              <p className="text-sm text-gray-600 mb-4">
-                Are you sure you want to delete this contact? This action cannot
-                be undone.
-              </p>
-
-              <div className="border rounded p-3 mb-4 bg-gray-50">
-                <div className="font-semibold">
-                  {deleteCandidate.name || "—"}
-                </div>
-                <div className="text-sm text-gray-600">
-                  {deleteCandidate.designation || ""}
-                </div>
-                <div className="text-sm text-gray-600">
-                  {deleteCandidate.company || ""}
-                </div>
-                <div className="text-xs text-gray-500 mt-2">
-                  {(deleteCandidate.phone_numbers || []).slice(0, 2).join(", ")}
-                  {deleteCandidate.email ? ` · ${deleteCandidate.email}` : ""}
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-2">
-                <button
-                  className="px-3 py-2 border rounded"
-                  onClick={cancelDelete}
-                  disabled={deleting}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="px-3 py-2 bg-red-600 text-white rounded flex items-center gap-2"
-                  onClick={confirmDelete}
-                  disabled={deleting}
-                >
-                  {deleting ? <Spinner size={3} /> : "Delete contact"}
-                </button>
-              </div>
-            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>

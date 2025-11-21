@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
-
 const ENV_API_BASE =
   globalThis?.process?.env?.REACT_APP_API_BASE ||
   (typeof import.meta !== "undefined" &&
@@ -77,6 +76,7 @@ export default function App() {
   const [loadingContacts, setLoadingContacts] = useState(false);
 
   const [saving, setSaving] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editPayload, setEditPayload] = useState({});
 
@@ -154,7 +154,11 @@ export default function App() {
     setError(null);
     try {
       const res = await doFetch("/all_cards");
-      setContacts(res.data || []);
+      // Accept either shape: res.data or res (if res is array)
+      const cards = Array.isArray(res) ? res : res?.data ?? [];
+      // ensure _id is string for consistent comparisons
+      const mapped = cards.map((c) => ({ ...c, _id: String(c._id) }));
+      setContacts(mapped);
     } catch (e) {
       setContacts([]);
       setError(String(e));
@@ -261,26 +265,95 @@ export default function App() {
   }
 
   function startEdit(card) {
-    setEditingId(card._id);
-    setEditPayload({ ...card });
+    // Defensive copy: convert phone_numbers to array if needed
+    const copy = { ...card };
+    copy.phone_numbers = copy.phone_numbers || [];
+    setEditingId(String(card._id));
+    setEditPayload(copy);
   }
 
+  // ---------- robust, verbose saveEdit ----------
   async function saveEdit() {
     if (!editingId) return;
+    setSavingEdit(true);
+    setError(null);
     try {
-      await doFetch(`/update_card/${editingId}`, {
+      // Make a payload copy and strip server-managed fields
+      const payload = { ...editPayload };
+      delete payload._id;
+      delete payload.created_at;
+      delete payload.edited_at;
+
+      // call backend
+      const res = await doFetch(`/update_card/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editPayload),
+        body: JSON.stringify(payload),
       });
+
+      // DEBUG: log the raw response so you can inspect it in the console
+      console.info("saveEdit: raw server response:", res);
+
+      // Accept server shapes:
+      // 1) { message: "...", data: { ... } }
+      // 2) { data: { ... } }
+      // 3) { ...contactFields... }
+      let serverData = null;
+      if (res && typeof res === "object") {
+        if (res.data && typeof res.data === "object") {
+          serverData = res.data;
+        } else {
+          const maybeKeys = ["_id", "name", "email", "company"];
+          const hasContactLike = maybeKeys.some((k) => k in res);
+          if (hasContactLike) serverData = res;
+        }
+      }
+      // Fallback to our payload if nothing else
+      if (!serverData) serverData = payload;
+
+      // Ensure ID is a string for comparisons
+      const idToUse = String(serverData._id || editingId);
+
+      // Optimistic local update (merge fields)
+      setContacts((list) =>
+        list.map((c) => {
+          if (String(c._id) === idToUse) {
+            return { ...c, ...serverData };
+          }
+          return c;
+        })
+      );
+
+      // close editor
       setEditingId(null);
       setEditPayload({});
-      await fetchAllCards();
+
+      // REFRESH from server to get canonical record (timestamps, normalizations)
+      // Replace state with the server canonical list after fetch.
+      try {
+        const fresh = await doFetch("/all_cards");
+        const cards = Array.isArray(fresh) ? fresh : fresh?.data ?? [];
+        const canonical = cards.map((d) => ({ ...d, _id: String(d._id) }));
+        setContacts(canonical);
+
+        console.info(
+          "saveEdit: canonical updated card:",
+          canonical.find((x) => String(x._id) === idToUse)
+        );
+      } catch (refreshErr) {
+        console.warn("saveEdit: refresh after update failed", refreshErr);
+      }
+
       showToast("Updated");
     } catch (e) {
-      setError(String(e));
+      const msg = e?.message || String(e);
+      setError(msg);
+      console.error("saveEdit error:", e);
+    } finally {
+      setSavingEdit(false);
     }
   }
+  // ---------- end saveEdit ----------
 
   // per-contact vCard (uses backend endpoint as before)
   async function downloadVcard(card) {
@@ -969,14 +1042,22 @@ export default function App() {
                             setEditingId(null);
                             setEditPayload({});
                           }}
+                          disabled={savingEdit}
                         >
                           Cancel
                         </button>
                         <button
-                          className="px-3 py-2 bg-indigo-600 text-white rounded"
+                          className="px-3 py-2 bg-indigo-600 text-white rounded flex items-center gap-2"
                           onClick={saveEdit}
+                          disabled={savingEdit}
                         >
-                          Save
+                          {savingEdit ? (
+                            <>
+                              <Spinner size={3} /> Saving...
+                            </>
+                          ) : (
+                            "Save"
+                          )}
                         </button>
                       </div>
                     </motion.div>
